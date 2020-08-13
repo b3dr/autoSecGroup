@@ -1,6 +1,7 @@
-package cloud_sdk
+package tencent
 
 import (
+	"acl/utils"
 	"encoding/json"
 	"fmt"
 	"github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/common"
@@ -9,7 +10,6 @@ import (
 	vpc "github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/vpc/v20170312"
 	ini "gopkg.in/ini.v1"
 	"os"
-	"strconv"
 	"strings"
 )
 
@@ -74,7 +74,7 @@ func (tencent *TencentCloud) ChangeRule(targetIP string, deviceName string) stri
 	}
 
 	fmt.Printf("\n查询安全策略...\n")
-	ingressPolicySet, err := tencent.queryPolicySet(secGroupId)
+	ingressPolicySet, version, err := tencent.queryPolicySet(secGroupId)
 	if err != nil {
 		fmt.Printf("\n查询安全策略失败！\n安全组ID： %v\n", secGroupId)
 		panic(err)
@@ -84,6 +84,7 @@ func (tencent *TencentCloud) ChangeRule(targetIP string, deviceName string) stri
 	isAutoPolicyExist := false // 标识位，判断自动策略是否在所有策略中
 	for _, policy := range ingressPolicySet {
 		isAutoPolicy, isTargetIP := tencent.parsePolicy(policy, targetIP, deviceName)
+		fmt.Printf("\n%v: %v\n", *policy.PolicyIndex, *policy.PolicyDescription)
 
 		// 当前策略是自动策略
 		if isAutoPolicy {
@@ -96,6 +97,7 @@ func (tencent *TencentCloud) ChangeRule(targetIP string, deviceName string) stri
 					message += response
 				} else {
 					fmt.Printf("\nModify request error!\n")
+					ParseResponseErr(err)
 					message += "Modify request error!"
 				}
 			} else { // 存在自动策略，且目标ip在策略中
@@ -107,9 +109,12 @@ func (tencent *TencentCloud) ChangeRule(targetIP string, deviceName string) stri
 		isAutoPolicyExist = isAutoPolicyExist || isAutoPolicy // 修改标记位
 	}
 
-	// TODO: 默认策略不存在，创建新策略
+	// 默认策略不存在，创建新策略
 	if !isAutoPolicyExist {
-
+		fmt.Printf("\nCreate new policy for device(%v)!\n", deviceName)
+		response, err := tencent.createPolicy(targetIP, DefaultPort, deviceName, version, secGroupId)
+		ParseResponseErr(err)
+		fmt.Printf(response)
 	}
 
 	return message
@@ -126,12 +131,7 @@ func (tencent *TencentCloud) querySecGroup() *vpc.DescribeSecurityGroupsResponse
 		panic(err)
 	}
 	response, err := tencent.Client.DescribeSecurityGroups(request)
-	if _, ok := err.(*errors.TencentCloudSDKError); ok {
-		fmt.Printf("An API error has returned: %s", err)
-	}
-	if err != nil {
-		panic(err)
-	}
+	ParseResponseErr(err)
 
 	fmt.Printf("%s", response.ToJsonString())
 	return response
@@ -154,8 +154,9 @@ func (tencent *TencentCloud) parseGroupSetResponse(groupResponse *vpc.DescribeSe
 }
 
 // 查询单个安全组的策略
-func (tencent *TencentCloud) queryPolicySet(secGroupId string) ([]*vpc.SecurityGroupPolicy, error) {
+func (tencent *TencentCloud) queryPolicySet(secGroupId string) ([]*vpc.SecurityGroupPolicy, string, error) {
 	var ingressPolicySet []*vpc.SecurityGroupPolicy
+	var version string
 
 	request := vpc.NewDescribeSecurityGroupPoliciesRequest()
 
@@ -170,9 +171,10 @@ func (tencent *TencentCloud) queryPolicySet(secGroupId string) ([]*vpc.SecurityG
 	}
 	if err == nil {
 		ingressPolicySet = response.Response.SecurityGroupPolicySet.Ingress
+		version = *response.Response.SecurityGroupPolicySet.Version
 	}
 
-	return ingressPolicySet, err
+	return ingressPolicySet, version, err
 }
 
 // 解析单条策略
@@ -186,7 +188,7 @@ func (tencent *TencentCloud) parsePolicy(policy *vpc.SecurityGroupPolicy, target
 		cip := *policy.CidrBlock
 
 		// 安全组策略中的ip不是所有ip，且目标ip在策略中
-		if cip != "0.0.0.0/0" && isBelong(targetIP, cip) {
+		if cip != "0.0.0.0/0" && utils.IsBelong(targetIP, cip) {
 			isTargetIP = true
 		}
 	}
@@ -194,11 +196,36 @@ func (tencent *TencentCloud) parsePolicy(policy *vpc.SecurityGroupPolicy, target
 	return isAutoPolicy, isTargetIP
 }
 
-// TODO: 创建策略
-func (tencent *TencentCloud) createPolicy(policy *vpc.SecurityGroupPolicy) string {
-	policyParams, _ := json.Marshal(policy)
+// 创建策略
+// 创建策略时，需要控制策略的索引，如果新策略在最后一条，策略的优先级是从前往后
+// 如果将新策略添加到最后一条，优先级太低，因为前面默认拒绝的策略优先级更高，新策略可能不生效
+// 因此需要将新策略插入到最前面，索引设置为0
+// 如果设置索引，需要指定策略组版本version
+func (tencent *TencentCloud) createPolicy(targetIP string, targetPort string, deviceName string, version string, secGroupId string) (string, error) {
+	protocol := DefaultProtocol
+	port := targetPort
+	action := DefaultAction
+	params := "{\"SecurityGroupId\":\"" + secGroupId +
+		"\",\"SecurityGroupPolicySet\":{\"Version\":\"" + version +
+		"\", \"Ingress\":[{\"PolicyIndex\":0, \"Protocol\":\"" + protocol +
+		"\",\"Port\":\"" + port +
+		"\",\"CidrBlock\":\"" + targetIP +
+		"\",\"Action\":\"" + action +
+		"\",\"PolicyDescription\":\"" + deviceName + "\"}]}}"
 
-	return string(policyParams)
+	fmt.Print("\n" + params + "\n")
+
+	params = GenerateRequestParams(params)
+	fmt.Print("\n" + params + "\n")
+
+	request := vpc.NewCreateSecurityGroupPoliciesRequest()
+	err := request.FromJsonString(params)
+	if err != nil {
+		panic(err)
+	}
+	response, err := tencent.Client.CreateSecurityGroupPolicies(request)
+
+	return response.ToJsonString(), err
 }
 
 // 修改策略
@@ -214,15 +241,12 @@ func (tencent *TencentCloud) modifyPolicy(targetIP string, targetPort string, ta
 	policyString = strings.ReplaceAll(policyString, "\"SecurityGroupId\":\""+*policy.SecurityGroupId+"\",", "")
 
 	params := "{\"SecurityGroupId\":\"" + *policy.SecurityGroupId + "\",\"SecurityGroupPolicySet\":{\"Ingress\":[" + policyString + "]}}"
-	params = strings.ReplaceAll(params, "\"ServiceTemplate\":{\"ServiceId\":\"\",\"ServiceGroupId\":\"\"},", "")
-	params = strings.ReplaceAll(params, "\"AddressTemplate\":{\"AddressId\":\"\",\"AddressGroupId\":\"\"},", "")
-	params = strings.ReplaceAll(params, "\"Ipv6CidrBlock\":\"\",", "")
+	params = GenerateRequestParams(params)
 
 	fmt.Printf("\nParams: \n%+v\n", params)
 
 	request := vpc.NewReplaceSecurityGroupPolicyRequest()
 
-	//params := "{\"SecurityGroupId\":\"sg-bekdu5br\",\"SecurityGroupPolicySet\":{\"Ingress\":[{\"PolicyIndex\":0,\"Protocol\":\"TCP\",\"Port\":\"80,443\",\"CidrBlock\":\"1.1.1.1/24\",\"SecurityGroupId\":\"sg-bekdu5br\",\"Action\":\"ACCEPT\",\"PolicyDescription\":\"Auto-White-Policy\"}]}}"
 	err := request.FromJsonString(params)
 	if err != nil {
 		panic(err)
@@ -230,24 +254,4 @@ func (tencent *TencentCloud) modifyPolicy(targetIP string, targetPort string, ta
 	response, err := tencent.Client.ReplaceSecurityGroupPolicy(request)
 
 	return response.ToJsonString(), err
-}
-
-func isBelong(ip, cidr string) bool {
-	ipAddr := strings.Split(ip, `.`)
-	if len(ipAddr) < 4 {
-		return false
-	}
-	cidrArr := strings.Split(cidr, `/`)
-	if len(cidrArr) < 2 {
-		return false
-	}
-	var tmp = make([]string, 0)
-	for key, value := range strings.Split(`255.255.255.0`, `.`) {
-		iint, _ := strconv.Atoi(value)
-
-		iint2, _ := strconv.Atoi(ipAddr[key])
-
-		tmp = append(tmp, strconv.Itoa(iint&iint2))
-	}
-	return strings.Join(tmp, `.`) == cidrArr[0]
 }

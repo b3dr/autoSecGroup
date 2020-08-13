@@ -1,6 +1,8 @@
 package cloud_sdk
 
 import (
+	"acl/pkg/tencent"
+	"acl/pkg/vultr"
 	"fmt"
 	ini "gopkg.in/ini.v1"
 	"os"
@@ -19,8 +21,8 @@ type Cloud interface {
 }
 
 type CloudSession struct {
-	TencentClient TencentCloud
-	VultrClient   VultrCloud
+	TencentClient tencent.TencentCloud
+	VultrClient   vultr.VultrCloud
 	CloudType     string
 	Cloud
 }
